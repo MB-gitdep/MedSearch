@@ -1,0 +1,16 @@
+{
+  "name": "medsearch",
+  "version": "1.0.0",
+  "description": "MedSearch - recherche de professionnels de sante (medecins via OpenDataSoft, Practitioners via l'API FHIR esante.gouv.fr), avec authentification SSO WordPress (OAuth2 miniOrange).",
+  "private": true,
+  "license": "MIT",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev:backend": "npm run start --workspace backend",
+    "dev:frontend": "npm run dev --workspace frontend",
+    "build:frontend": "npm run build --workspace frontend"
+  }
+}
