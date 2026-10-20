@@ -168,3 +168,129 @@ body {
     padding: 6px 10px;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Resultats de recherche et fiche detaillee (pop-in <dialog> native)  */
+/* ------------------------------------------------------------------ */
+.result-card {
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid #ccc;
+}
+
+.form-error {
+  color: #b00020;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: bold;
+  color: #0056b3;
+  text-decoration: underline;
+  cursor: pointer;
+  text-align: left;
+}
+
+.link-button:hover,
+.link-button:focus-visible {
+  color: #003d80;
+}
+
+.pro-dialog {
+  border: none;
+  border-radius: 8px;
+  padding: 0;
+  width: min(92vw, 640px);
+  max-height: 85vh;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+}
+
+.pro-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.pro-dialog__panel {
+  display: flex;
+  flex-direction: column;
+  max-height: 85vh;
+  text-align: left;
+}
+
+.pro-dialog__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid #eee;
+}
+
+.pro-dialog__header h2 {
+  margin: 0;
+  font-size: 1.2rem;
+  overflow-wrap: anywhere;
+}
+
+.pro-dialog__close {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pro-dialog__body {
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, 35%) 1fr;
+  gap: 8px 16px;
+  margin: 0;
+}
+
+.detail-grid dt {
+  font-weight: bold;
+  color: #333;
+}
+
+.detail-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Objets imbriques (donnees FHIR) */
+.detail-grid .detail-grid {
+  padding-left: 12px;
+  border-left: 2px solid #eee;
+}
+
+.detail-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+/* Empeche le defilement de la page derriere la fiche ouverte */
+body:has(dialog[open]) {
+  overflow: hidden;
+}
+
+@media (max-width: 480px) {
+  .detail-grid {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .detail-grid dd {
+    margin-bottom: 8px;
+  }
+}

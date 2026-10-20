@@ -1,31 +1,51 @@
 // components/Callback.jsx
 //
-// Page de retour du SSO WordPress. Recupere le "code" d'autorisation dans
-// l'URL et l'envoie a notre backend (POST /auth/token), qui seul connait le
-// client_secret et effectue l'echange final aupres du serveur WordPress.
-// Le frontend ne manipule jamais le secret : voir authConfig.js.
+// Page de retour du SSO WordPress. Verifie le parametre "state" (anti-CSRF),
+// puis envoie le "code" d'autorisation a notre backend (POST /auth/token), qui
+// seul connait le client_secret et effectue l'echange final.
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import PropTypes from 'prop-types';
 import { useLocation, useNavigate } from 'react-router-dom';
-import axios from 'axios';
-import { tokenExchangeUrl } from '../authConfig';
+import api, { getErrorMessage, setAccessToken } from '../api';
+import { OAUTH_STATE_KEY } from '../authConfig';
+
+// Lit puis supprime le "state" memorise : il n'est valable qu'une seule fois.
+function consumeExpectedState() {
+  try {
+    const state = sessionStorage.getItem(OAUTH_STATE_KEY);
+    sessionStorage.removeItem(OAUTH_STATE_KEY);
+    return state;
+  } catch {
+    return null;
+  }
+}
 
 const Callback = ({ setIsAuthenticated }) => {
   const location = useLocation();
   const navigate = useNavigate();
   const [error, setError] = useState(null);
+  // Un code d'autorisation est a usage unique : on garantit qu'il n'est
+  // echange qu'une fois, meme si React rejoue l'effet (mode StrictMode).
+  const hasRun = useRef(false);
 
   useEffect(() => {
-    let cancelled = false;
+    if (hasRun.current) return;
+    hasRun.current = true;
 
     const handleCallback = async () => {
       const queryParams = new URLSearchParams(location.search);
       const code = queryParams.get('code');
-      const oauthError = queryParams.get('error');
+      const returnedState = queryParams.get('state');
+      const expectedState = consumeExpectedState();
 
-      if (oauthError) {
-        setError("La connexion a ete refusee ou a echoue.");
+      if (queryParams.get('error')) {
+        setError('La connexion a été refusée ou a échoué.');
+        return;
+      }
+
+      if (!expectedState || !returnedState || returnedState !== expectedState) {
+        setError('Retour de connexion invalide (état de session non reconnu). Merci de réessayer.');
         return;
       }
 
@@ -35,47 +55,38 @@ const Callback = ({ setIsAuthenticated }) => {
       }
 
       try {
-        const response = await axios.post(tokenExchangeUrl, { code });
-        const accessToken = response.data.access_token;
+        const response = await api.post('/auth/token', { code });
+        const accessToken = response.data?.access_token;
 
-        if (!accessToken) {
-          throw new Error('Reponse invalide du serveur.');
+        if (typeof accessToken !== 'string' || accessToken === '') {
+          throw new Error('Réponse invalide du serveur.');
         }
-
-        if (cancelled) return;
 
         // Le token est conserve cote client pour authentifier les appels API
-        // suivants. A noter : le localStorage reste accessible en cas de
-        // faille XSS sur le site ; pour un durcissement supplementaire, une
-        // evolution possible est de faire porter la session par un cookie
-        // httpOnly pose par le backend plutot que par le frontend.
-        localStorage.setItem('accessToken', accessToken);
-
-        if (setIsAuthenticated) {
-          setIsAuthenticated(true);
+        // suivants. Le localStorage reste lisible en cas de faille XSS : c'est
+        // pourquoi le site est protege par une CSP stricte (voir README).
+        if (!setAccessToken(accessToken)) {
+          setError("Impossible d'enregistrer la session : le stockage du navigateur est indisponible.");
+          return;
         }
 
-        navigate('/');
+        setIsAuthenticated?.(true);
+        // replace : le code d'autorisation ne reste pas dans l'historique.
+        navigate('/', { replace: true });
       } catch (err) {
-        console.error('Erreur lors de la recuperation du token:', err);
-        if (!cancelled) {
-          setError("La connexion a echoue. Merci de reessayer.");
-        }
+        console.error('Erreur lors de la récupération du token:', err);
+        setError(getErrorMessage(err, 'La connexion a échoué. Merci de réessayer.'));
       }
     };
 
     handleCallback();
-
-    return () => {
-      cancelled = true;
-    };
   }, [location, navigate, setIsAuthenticated]);
 
   if (error) {
     return (
       <div>
-        <p>{error}</p>
-        <button onClick={() => navigate('/login')}>Reessayer</button>
+        <p role="alert">{error}</p>
+        <button onClick={() => navigate('/login', { replace: true })}>Réessayer</button>
       </div>
     );
   }
