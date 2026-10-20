@@ -56,7 +56,9 @@ doivent jamais etre commites dans Git** (ils sont ignores par `.gitignore`).
 | `PORT` | Port d'ecoute du serveur Express (defaut : 3000) |
 | `CORS_ORIGIN` | URL du frontend autorisee a appeler l'API |
 | `ESANTE_API_KEY` | Cle d'API de la plateforme esante.gouv.fr |
+| `HOST` | Interface d'ecoute (defaut : `127.0.0.1`, ne pas exposer le backend au reseau) |
 | `WP_TOKEN_ENDPOINT` | Endpoint OAuth2 "token" du SSO WordPress |
+| `WP_USERINFO_ENDPOINT` | Endpoint "userinfo" du SSO, utilise pour verifier chaque token |
 | `WP_CLIENT_ID` | Client ID du plugin miniOrange |
 | `WP_CLIENT_SECRET` | Client secret du plugin miniOrange (**secret**) |
 | `WP_REDIRECT_URI` | URI de redirection post-connexion |
@@ -92,37 +94,86 @@ npm run build:frontend
 
 Le resultat est genere dans `frontend/dist/`.
 
+## Fiche detaillee d'un professionnel
+
+Un clic sur le nom d'un professionnel ouvre une fiche avec **toutes** ses
+informations. Elle utilise l'element HTML natif `<dialog>` en mode modal, choisi
+parce que c'est l'option la plus sure : aucune bibliotheque tierce, focus clavier
+et touche Echap geres par le navigateur, pas de `window.open()` (donc pas de
+"tabnabbing"). Les donnees sont toujours rendues comme du texte, jamais comme du
+HTML, et aucun lien n'est construit a partir des donnees.
+
+Les champs `column_N` du jeu de donnees OpenDataSoft n'ont pas de nom officiel ;
+leurs libelles sont deduits de leur contenu et se corrigent dans
+`frontend/src/components/detailLabels.js`.
+
 ## Securite
 
-Ce projet a fait l'objet d'une revue de securite. Points notables corriges :
+Points traites :
 
-- Le **client secret OAuth2** n'est plus present dans le code frontend :
-  l'echange du code d'autorisation contre un token se fait desormais cote
-  backend (route `POST /auth/token`).
-- La **cle d'API esante.gouv.fr** n'est plus codee en dur dans le code
-  source : elle est lue depuis une variable d'environnement.
-- Validation des parametres d'entree (code departement, pagination) cote
-  backend et cote frontend.
-- Ajout d'en-tetes de securite HTTP ([Helmet](https://helmetjs.github.io/))
-  et d'une limitation de debit ([express-rate-limit](https://www.npmjs.com/package/express-rate-limit)).
-- Gestion centralisee des exceptions (middleware d'erreur, routes non
-  trouvees, erreurs de promesses non gerees) : le detail des erreurs internes
-  n'est jamais renvoye au client.
-- Mise a jour des dependances presentant des vulnerabilites connues, et
-  suppression des dependances non utilisees (`fhir-kit-client`,
-  `simple-oauth2` cote frontend).
+- **Secrets** : le client secret OAuth2 et la cle d'API esante.gouv.fr ne sont
+  plus dans le code ; ils sont lus depuis `backend/.env` (ignore par Git).
+- **Routes protegees** : `/medecins` et `/fhir/practitioners` exigent un token
+  valide, verifie aupres du SSO WordPress (endpoint userinfo, cache de 60 s).
+  Avant, l'ecran de connexion n'etait qu'un decor cote navigateur : l'API etait
+  interrogeable directement.
+- **OAuth2** : echange du code cote backend uniquement, parametre `state`
+  anti-CSRF verifie au retour, code a usage unique protege contre le double envoi.
+- **Entrees** : validation stricte (code departement, pagination, code OAuth),
+  corps JSON limite a 10 Ko, donnees tierces nettoyees (types, tailles et
+  profondeur bornes) avant d'etre renvoyees au navigateur.
+- **Exceptions** : middleware d'erreur central, 404 JSON, erreurs 4xx explicites,
+  erreurs internes jamais detaillees au client, arret propre (SIGTERM), message
+  clair si le port est deja pris, `ErrorBoundary` et messages d'erreur lisibles
+  cote React, expiration de session geree (retour a l'ecran de connexion).
+- **Reseau** : en-tetes Helmet, `Cache-Control: no-store`, limitation de debit
+  (globale + stricte sur `/auth/token`), `trust proxy` limite a la boucle locale
+  (sinon tous les visiteurs partageraient un seul compteur derriere Apache),
+  ecoute sur `127.0.0.1` uniquement.
+- **Dependances** : vulnerabilites connues corrigees (`npm audit` : 0), dependances
+  inutilisees retirees. Relancer `npm audit` regulierement.
 
-**Important — a faire avant toute mise en production** : les valeurs de cle
-d'API et de client secret presentes dans une version anterieure du code
-source doivent etre considerees comme compromises et **regenerees** aupres
-d'esante.gouv.fr et du plugin miniOrange, meme apres application de ce
-correctif.
+**A faire avant toute mise en production** : les valeurs de cle d'API et de client
+secret qui ont figure dans une version anterieure du code (ou dans des fichiers
+de configuration partages) doivent etre considerees comme compromises et
+**regenerees**. Cela vaut aussi pour tout secret laisse en commentaire dans la
+configuration Apache (`OIDCClientSecret`, `OIDCCryptoPassphrase`...) : supprimer
+ces lignes plutot que les commenter.
 
-Piste d'amelioration future : stocker le token de session dans un cookie
-`httpOnly` pose par le backend plutot que dans le `localStorage` du
-navigateur, afin de reduire l'impact d'une eventuelle faille XSS.
+## Durcissement du deploiement (Apache / serveur)
+
+**1. Ne pas faire tourner le backend en root.** Le creer sous un compte sans
+privileges (ex. `www-data`, ou un compte dedie), avec un `.env` lisible par lui seul :
+
+```bash
+sudo chown www-data:www-data backend/.env && sudo chmod 600 backend/.env
+sudo -u www-data pm2 start backend/server.js --name medSearch
+sudo -u www-data pm2 save
+```
+
+**2. Cibler l'IPv4 explicitement** dans Apache (le backend n'ecoute que sur 127.0.0.1) :
+
+```apache
+ProxyPass /MedSearch/api http://127.0.0.1:3000
+ProxyPassReverse /MedSearch/api http://127.0.0.1:3000
+```
+
+**3. CSP stricte pour MedSearch uniquement.** La politique globale du vhost
+autorise `'unsafe-inline'` et `'unsafe-eval'` (necessaire a WordPress, pas a
+MedSearch). Cette politique, limitee a `/MedSearch`, remplace la globale pour
+cette application ; la tester dans la console du navigateur (aucune violation
+CSP ne doit apparaitre) avant de la garder :
+
+```apache
+<Location /MedSearch>
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+</Location>
+```
+
+Piste d'amelioration restante : le token est garde dans le `localStorage`, lisible
+en cas de faille XSS (la CSP ci-dessus reduit fortement ce risque). Une session
+portee par un cookie `httpOnly` pose par le backend serait plus robuste.
 
 ## Licence
 
 Distribue sous licence MIT, voir [LICENSE](./LICENSE).
-# MedSearch

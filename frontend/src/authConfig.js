@@ -10,8 +10,7 @@
 //
 // Toutes les valeurs ci-dessous sont donc publiques par nature (identifiant
 // client, URLs). Elles sont lues depuis les variables d'environnement Vite
-// (prefixees VITE_, voir .env.example) pour eviter de coder en dur une URL
-// de dev/prod dans le code source.
+// (prefixees VITE_, voir .env.example).
 
 export const authConfig = {
   clientId: import.meta.env.VITE_OAUTH_CLIENT_ID,
@@ -21,6 +20,6 @@ export const authConfig = {
   scopes: ['openid', 'profile', 'email'],
 };
 
-// L'echange de token se fait via notre propre backend (jamais directement
-// vers le serveur WordPress depuis le navigateur).
-export const tokenExchangeUrl = `${import.meta.env.VITE_API_BASE_URL}/auth/token`;
+// Cle de sessionStorage ou est garde le parametre "state" anti-CSRF le temps
+// de la redirection vers le SSO.
+export const OAUTH_STATE_KEY = 'oauthState';
