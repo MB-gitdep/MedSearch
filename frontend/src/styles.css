@@ -294,3 +294,118 @@ body:has(dialog[open]) {
     margin-bottom: 8px;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Formulaire de recherche FHIR multicriteres                          */
+/* ------------------------------------------------------------------ */
+.fhir-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px 20px;
+  max-width: 760px;
+  margin: 0 auto 16px;
+  text-align: left;
+}
+
+.fhir-form .fhir-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.fhir-form fieldset {
+  margin: 0;
+  padding: 10px 14px 14px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+}
+
+.fhir-form legend {
+  padding: 0 6px;
+  font-weight: bold;
+}
+
+.fhir-form label {
+  display: block;
+  margin: 10px 0 3px;
+  font-weight: bold;
+  font-size: 0.9rem;
+}
+
+.fhir-form input,
+.fhir-form select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.fhir-hint {
+  font-size: 0.9rem;
+  color: #555;
+}
+
+.secondary-button {
+  margin-left: 8px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Fiche detaillee : sections lisibles                                 */
+/* ------------------------------------------------------------------ */
+.fiche-subtitle {
+  margin: 4px 0 0;
+  color: #555;
+  font-size: 0.95rem;
+}
+
+.fiche-section {
+  margin: 0 0 20px;
+}
+
+.fiche-section h3 {
+  margin: 0 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 2px solid #e1ebf6;
+  font-size: 1rem;
+  color: #0b3d6e;
+}
+
+.fiche-empty {
+  margin: 0;
+  color: #666;
+  font-style: italic;
+}
+
+.fiche-lieu {
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border: 1px solid #e3e3e3;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.fiche-lieu strong,
+.fiche-lieu span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.fiche-raw {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px dashed #ccc;
+}
+
+.fiche-raw summary {
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: #0056b3;
+}
+
+.fiche-raw .detail-grid {
+  margin-top: 10px;
+  font-size: 0.85rem;
+}
+
+.pro-dialog__footer {
+  padding: 12px 20px;
+  border-top: 1px solid #eee;
+  text-align: right;
+}

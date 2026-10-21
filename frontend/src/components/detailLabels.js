@@ -45,12 +45,14 @@ export const MEDECIN_LABELS = {
   tarif_base_de_remboursement_securite_sociale: 'Tarif de base de remboursement (Sécurité sociale)',
 };
 
-export const MEDECIN_ORDER = Object.keys(MEDECIN_LABELS);
-
 // "concat" n'est qu'une concatenation technique de "nom" et "adresse".
 export const MEDECIN_HIDDEN = ['concat'];
 
 export const FHIR_LABELS = {
+  practitioner: 'Professionnel',
+  roles: "Situations d'exercice",
+  organizations: 'Structures',
+  placesUnavailable: "Lieux d'exercice indisponibles",
   resourceType: 'Type de ressource',
   id: 'Identifiant',
   identifier: 'Identifiants',
@@ -87,10 +89,6 @@ export const FHIR_LABELS = {
   lastUpdated: 'Dernière mise à jour',
   profile: 'Profil',
 };
-
-export const FHIR_ORDER = ['resourceType', 'id', 'identifier', 'active', 'name', 'gender', 'birthDate', 'telecom', 'address', 'qualification'];
-
-export const FHIR_HIDDEN = [];
 
 // Libelle d'une cle : libelle connu, sinon nom brut mis en forme.
 export function labelFor(key, labels) {
