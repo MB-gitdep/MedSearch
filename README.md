@@ -94,14 +94,45 @@ npm run build:frontend
 
 Le resultat est genere dans `frontend/dist/`.
 
-## Fiche detaillee d'un professionnel
+## Recherche dans l'Annuaire Sante (FHIR)
 
-Un clic sur le nom d'un professionnel ouvre une fiche avec **toutes** ses
-informations. Elle utilise l'element HTML natif `<dialog>` en mode modal, choisi
-parce que c'est l'option la plus sure : aucune bibliotheque tierce, focus clavier
-et touche Echap geres par le navigateur, pas de `window.open()` (donc pas de
-"tabnabbing"). Les donnees sont toujours rendues comme du texte, jamais comme du
-HTML, et aucun lien n'est construit a partir des donnees.
+Criteres combinables (ils se cumulent) : **nom, prenom, profession, specialite**
+et **lieu** (ville, code postal, departement, rue). Les listes de professions et
+de specialites viennent des terminologies officielles de l'ANS
+(`frontend/src/fhirOptions.js`, codes actifs uniquement).
+
+Limites de l'API publique (CapabilityStatement officiel de l'Annuaire Sante) :
+
+- Un professionnel (`Practitioner`) n'a **ni adresse ni telephone** dans les donnees
+  publiques : le lieu est porte par ses structures (`Organization`), reliees par ses
+  situations d'exercice (`PractitionerRole`). La recherche par lieu passe donc par
+  les structures (`backend/fhirSearch.js`).
+- Le **departement** est obtenu par prefixe de code postal (Corse : 2A = 200xx-201xx,
+  2B = 202xx-206xx). La **region** n'est pas filtrable par l'API.
+- Pour un lieu seul dans une grande ville, les resultats peuvent etre **tronques**
+  (volumes limites pour proteger l'API et la cle) : l'application l'indique et invite
+  a ajouter des criteres (nom, profession...). Avec un nom ou une profession, la
+  recherche part des personnes et le filtre par lieu est applique ensuite.
+- Aucun critere = refus (evite de telecharger l'annuaire entier).
+
+Si un critere ne donne jamais de resultat alors qu'il devrait, consulter
+`pm2 logs medSearch` : la ligne `Erreur FHIR (...)` contient la reponse de l'API
+(cle d'API jamais journalisee).
+
+## Fiches detaillees
+
+Un clic sur un nom ouvre une fiche dans une pop-in basee sur l'element HTML natif
+`<dialog>` en mode modal, choisi parce que c'est l'option la plus sure : aucune
+bibliotheque tierce, focus clavier et touche Echap geres par le navigateur, pas de
+`window.open()` (donc pas de "tabnabbing"). Les donnees sont toujours rendues comme
+du texte, jamais comme du HTML, et aucun lien n'est construit a partir des donnees.
+
+- **Fiche Annuaire Sante** : sections lisibles (profession et specialites, lieux
+  d'exercice avec adresse et contacts, identite, identifiants RPPS / ID NPS,
+  diplomes, carte CPS, derniere mise a jour). Les lieux sont charges a l'ouverture ;
+  s'ils sont indisponibles, la fiche reste affichee. Toutes les donnees brutes
+  restent accessibles dans un bloc replie en bas de fiche.
+- **Fiche medecin (OpenDataSoft)** : identite, activite, localisation, autres informations.
 
 Les champs `column_N` du jeu de donnees OpenDataSoft n'ont pas de nom officiel ;
 leurs libelles sont deduits de leur contenu et se corrigent dans
@@ -170,9 +201,6 @@ CSP ne doit apparaitre) avant de la garder :
 </Location>
 ```
 
-Piste d'amelioration restante : le token est garde dans le `localStorage`, lisible
-en cas de faille XSS (la CSP ci-dessus reduit fortement ce risque). Une session
-portee par un cookie `httpOnly` pose par le backend serait plus robuste.
 
 ## Licence
 

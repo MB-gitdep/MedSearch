@@ -5,7 +5,8 @@
 //  - POST /auth/token          -> echange securise du "code" OAuth2 contre un access_token
 //                                 (le client_secret WordPress reste ici, jamais cote frontend)
 //  - GET  /medecins            -> annuaire des medecins (OpenDataSoft)         [authentifie]
-//  - GET  /fhir/practitioners  -> Practitioners FHIR (esante.gouv.fr)          [authentifie]
+//  - GET  /fhir/practitioners      -> recherche FHIR (nom, prenom, lieu, profession...) [authentifie]
+//  - GET  /fhir/practitioners/:id  -> fiche detaillee d'un professionnel FHIR           [authentifie]
 //  - GET  /test                -> verification que le serveur repond
 //
 // Les routes de donnees exigent un access_token valide : il est verifie aupres
@@ -28,6 +29,8 @@ const axios = require('axios');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { sanitizeDeep } = require('./sanitize');
+const { buildCriteria, searchPractitioners, getPractitionerDetail, NotFoundError } = require('./fhirSearch');
 
 const app = express();
 
@@ -197,49 +200,6 @@ function parsePagination(query) {
   return { limit, offset };
 }
 
-// Nettoyage des donnees venant d'API tierces avant de les renvoyer au
-// navigateur : on ne laisse passer que des types simples (texte, nombre,
-// booleen, tableaux, objets), avec des tailles et une profondeur bornees, et
-// on retire les valeurs vides. Le frontend n'affiche ces valeurs que comme du
-// texte (jamais en HTML), mais borner les donnees en amont reste une
-// defense en profondeur.
-const MAX_DEPTH = 6;
-const MAX_STRING_LENGTH = 500;
-const MAX_ARRAY_LENGTH = 50;
-const MAX_OBJECT_KEYS = 60;
-const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-
-function sanitizeDeep(value, depth = 0) {
-  if (value === null || value === undefined || depth > MAX_DEPTH) return undefined;
-
-  if (typeof value === 'string') {
-    const text = value.trim().slice(0, MAX_STRING_LENGTH);
-    return text === '' ? undefined : text;
-  }
-  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-  if (typeof value === 'boolean') return value;
-
-  if (Array.isArray(value)) {
-    const items = value
-      .slice(0, MAX_ARRAY_LENGTH)
-      .map((item) => sanitizeDeep(item, depth + 1))
-      .filter((item) => item !== undefined);
-    return items.length > 0 ? items : undefined;
-  }
-
-  if (typeof value === 'object') {
-    const clean = Object.create(null);
-    for (const [key, item] of Object.entries(value).slice(0, MAX_OBJECT_KEYS)) {
-      if (FORBIDDEN_KEYS.has(key) || key.length > 64) continue;
-      const cleanItem = sanitizeDeep(item, depth + 1);
-      if (cleanItem !== undefined) clean[key] = cleanItem;
-    }
-    return Object.keys(clean).length > 0 ? clean : undefined;
-  }
-
-  return undefined;
-}
-
 // ---------------------------------------------------------------------------
 // Recherche de medecins (OpenDataSoft)
 // ---------------------------------------------------------------------------
@@ -285,37 +245,65 @@ app.get('/medecins', requireAuth, asyncHandler(async (req, res) => {
 // ---------------------------------------------------------------------------
 // Practitioners FHIR (esante.gouv.fr)
 // ---------------------------------------------------------------------------
+
+// Appel unique vers l'API FHIR : ajoute la cle d'API (qui ne quitte jamais le
+// serveur), borne le delai et la taille de la reponse.
+async function fhirGet(path, params) {
+  const response = await axios.get(`${ESANTE_API_URL}/v2/${path}`, {
+    headers: {
+      'ESANTE-API-KEY': ESANTE_API_KEY,
+      'Content-Type': 'application/json',
+    },
+    params,
+    timeout: 10000,
+    maxContentLength: 5 * 1024 * 1024,
+  });
+  return response.data;
+}
+
+// Repond au client pour une erreur venue de l'API FHIR. Le detail complet (y
+// compris le message d'erreur renvoye par l'API, utile pour diagnostiquer un
+// critere non supporte) n'est ecrit que dans les logs serveur.
+function respondFhirError(res, error, context, notFoundMessage) {
+  if (error instanceof NotFoundError || error.response?.status === 404) {
+    return res.status(404).json({ error: notFoundMessage });
+  }
+  console.error(`Erreur FHIR (${context}):`, error.response?.status, error.response?.data || error.message);
+  if (error.response?.status === 429) {
+    return res.status(503).json({ error: 'Le service national est momentanement sature, reessayez dans quelques instants.' });
+  }
+  return res.status(502).json({ error: "Impossible de recuperer les donnees de l'API FHIR." });
+}
+
+// Recherche par nom, prenom, profession, specialite et/ou lieu (ville, code
+// postal, departement, rue). Voir fhirSearch.js pour la strategie employee.
 app.get('/fhir/practitioners', requireAuth, asyncHandler(async (req, res) => {
   if (!ESANTE_API_KEY) {
     return res.status(500).json({ error: 'Configuration serveur incomplete (ESANTE_API_KEY manquante).' });
   }
 
-  const { limit } = parsePagination(req.query);
+  const parsed = buildCriteria(req.query);
+  if (!parsed.ok) {
+    return res.status(400).json({ error: parsed.error });
+  }
 
   try {
-    const response = await axios.get(`${ESANTE_API_URL}/v2/Practitioner`, {
-      headers: {
-        'ESANTE-API-KEY': ESANTE_API_KEY,
-        'Content-Type': 'application/json',
-      },
-      params: {
-        _total: 'accurate',
-        _count: limit,
-        'qualification-code': '10',
-      },
-      timeout: 10000,
-      maxContentLength: 5 * 1024 * 1024,
-    });
-
-    // On extrait uniquement les ressources Practitioner du Bundle FHIR.
-    const practitioners = (response.data.entry || [])
-      .map((entry) => sanitizeDeep(entry.resource))
-      .filter(Boolean);
-
-    res.json({ total: Number(response.data.total) || practitioners.length, practitioners });
+    res.json(await searchPractitioners(parsed.criteria, fhirGet));
   } catch (error) {
-    console.error('Erreur FHIR:', error.response?.data || error.message);
-    res.status(502).json({ error: "Impossible de recuperer les donnees de l'API FHIR." });
+    respondFhirError(res, error, 'recherche', 'Aucun resultat.');
+  }
+}));
+
+// Fiche detaillee d'un professionnel (identite + lieux d'exercice).
+app.get('/fhir/practitioners/:id', requireAuth, asyncHandler(async (req, res) => {
+  if (!ESANTE_API_KEY) {
+    return res.status(500).json({ error: 'Configuration serveur incomplete (ESANTE_API_KEY manquante).' });
+  }
+
+  try {
+    res.json(await getPractitionerDetail(req.params.id, fhirGet));
+  } catch (error) {
+    respondFhirError(res, error, 'fiche', 'Professionnel introuvable.');
   }
 }));
 
