@@ -2,12 +2,13 @@
 //
 // Page de retour du SSO WordPress. Verifie le parametre "state" (anti-CSRF),
 // puis envoie le "code" d'autorisation a notre backend (POST /auth/token), qui
-// seul connait le client_secret et effectue l'echange final.
+// seul connait le client_secret, effectue l'echange final et ouvre la session
+// (cookie HttpOnly).
 
 import React, { useEffect, useRef, useState } from 'react';
 import PropTypes from 'prop-types';
 import { useLocation, useNavigate } from 'react-router-dom';
-import api, { getErrorMessage, setAccessToken } from '../api';
+import api, { getErrorMessage } from '../api';
 import { OAUTH_STATE_KEY } from '../authConfig';
 
 // Lit puis supprime le "state" memorise : il n'est valable qu'une seule fois.
@@ -55,19 +56,11 @@ const Callback = ({ setIsAuthenticated }) => {
       }
 
       try {
+        // Le backend echange le code, ouvre la session et pose un cookie
+        // HttpOnly : le navigateur ne recoit jamais le token d'acces.
         const response = await api.post('/auth/token', { code });
-        const accessToken = response.data?.access_token;
-
-        if (typeof accessToken !== 'string' || accessToken === '') {
+        if (response.data?.authenticated !== true) {
           throw new Error('Réponse invalide du serveur.');
-        }
-
-        // Le token est conserve cote client pour authentifier les appels API
-        // suivants. Le localStorage reste lisible en cas de faille XSS : c'est
-        // pourquoi le site est protege par une CSP stricte (voir README).
-        if (!setAccessToken(accessToken)) {
-          setError("Impossible d'enregistrer la session : le stockage du navigateur est indisponible.");
-          return;
         }
 
         setIsAuthenticated?.(true);

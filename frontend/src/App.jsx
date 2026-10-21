@@ -1,8 +1,8 @@
 // App.jsx
 //
-// Composant racine : gere le routage et l'etat global d'authentification
-// (presence d'un token ; sa validite reelle est verifiee par le backend a
-// chaque requete).
+// Composant racine : gere le routage et l'etat global d'authentification.
+// La session est portee par un cookie HttpOnly que le JavaScript ne peut pas
+// lire : au demarrage, on demande donc au backend si on est connecte.
 
 import './styles.css';
 import React, { useState, useEffect } from 'react';
@@ -11,14 +11,34 @@ import SearchForm from './components/SearchForm';
 import Auth from './components/Auth';
 import Callback from './components/Callback';
 import { authConfig } from './authConfig';
-import { AUTH_EXPIRED_EVENT, clearAccessToken, getAccessToken } from './api';
+import api, { AUTH_EXPIRED_EVENT, purgeLegacyToken } from './api';
 
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => Boolean(getAccessToken()));
+  // null = verification en cours, true/false = resultat.
+  const [isAuthenticated, setIsAuthenticated] = useState(null);
   const [sessionExpired, setSessionExpired] = useState(false);
 
-  // Le backend a refuse le token (expire/revoque) : on repasse en deconnecte
-  // et on previent l'utilisateur au lieu de le laisser devant des erreurs.
+  useEffect(() => {
+    // Supprime l'ancien token des versions precedentes (voir api.js).
+    purgeLegacyToken();
+
+    let ignore = false;
+    api
+      .get('/auth/session')
+      .then((response) => {
+        if (!ignore) setIsAuthenticated(response.data?.authenticated === true);
+      })
+      .catch((error) => {
+        console.error('Verification de session impossible:', error);
+        if (!ignore) setIsAuthenticated(false);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  // Le backend a refuse la session (expiree/revoquee) : on repasse en
+  // deconnecte et on previent l'utilisateur au lieu de le laisser devant des erreurs.
   useEffect(() => {
     const handleExpired = () => {
       setIsAuthenticated(false);
@@ -28,8 +48,13 @@ function App() {
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleExpired);
   }, []);
 
-  const handleLogout = () => {
-    clearAccessToken();
+  const handleLogout = async () => {
+    try {
+      // Detruit la session cote serveur et supprime le cookie.
+      await api.post('/auth/logout');
+    } catch (error) {
+      console.error('Erreur lors de la deconnexion:', error);
+    }
     setIsAuthenticated(false);
 
     // Redirige vers l'endpoint de deconnexion du serveur SSO WordPress.
@@ -42,7 +67,9 @@ function App() {
         <Route
           path="/"
           element={
-            isAuthenticated ? (
+            isAuthenticated === null ? (
+              <p>Chargement...</p>
+            ) : isAuthenticated ? (
               <>
                 <SearchForm />
                 <button onClick={handleLogout}>Se déconnecter</button>
