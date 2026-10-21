@@ -58,7 +58,12 @@ doivent jamais etre commites dans Git** (ils sont ignores par `.gitignore`).
 | `ESANTE_API_KEY` | Cle d'API de la plateforme esante.gouv.fr |
 | `HOST` | Interface d'ecoute (defaut : `127.0.0.1`, ne pas exposer le backend au reseau) |
 | `WP_TOKEN_ENDPOINT` | Endpoint OAuth2 "token" du SSO WordPress |
-| `WP_USERINFO_ENDPOINT` | Endpoint "userinfo" du SSO, utilise pour verifier chaque token |
+| `WP_USERINFO_ENDPOINT` | Endpoint "userinfo" du SSO, utilise pour revalider le token de chaque session |
+| `COOKIE_SECURE` | Cookie de session envoye en HTTPS uniquement (defaut : `true` ; `false` seulement pour un test local en http) |
+| `COOKIE_PATH` | Chemin public de l'API vu par le navigateur (defaut : `/MedSearch/api`) |
+| `SESSION_MAX_AGE_HOURS` | Duree maximale d'une session (defaut : 8) |
+| `SESSION_IDLE_MINUTES` | Delai d'inactivite avant expiration (defaut : 60) |
+| `SESSION_REVALIDATE_SECONDS` | Frequence de revalidation du token aupres du SSO (defaut : 60) |
 | `WP_CLIENT_ID` | Client ID du plugin miniOrange |
 | `WP_CLIENT_SECRET` | Client secret du plugin miniOrange (**secret**) |
 | `WP_REDIRECT_URI` | URI de redirection post-connexion |
@@ -144,10 +149,20 @@ Points traites :
 
 - **Secrets** : le client secret OAuth2 et la cle d'API esante.gouv.fr ne sont
   plus dans le code ; ils sont lus depuis `backend/.env` (ignore par Git).
-- **Routes protegees** : `/medecins` et `/fhir/practitioners` exigent un token
-  valide, verifie aupres du SSO WordPress (endpoint userinfo, cache de 60 s).
-  Avant, l'ecran de connexion n'etait qu'un decor cote navigateur : l'API etait
-  interrogeable directement.
+- **Routes protegees** : `/medecins` et `/fhir/practitioners` exigent une session
+  ouverte. Avant, l'ecran de connexion n'etait qu'un decor cote navigateur : l'API
+  etait interrogeable directement.
+- **Session par cookie HttpOnly** : apres la connexion SSO, le token d'acces reste
+  **cote serveur** (jamais envoye au navigateur) ; le navigateur recoit seulement un
+  identifiant de session aleatoire de 256 bits dans un cookie `HttpOnly` (illisible par
+  JavaScript : une faille XSS ne peut plus voler la session), `Secure` (HTTPS
+  uniquement), `SameSite=Strict` (jamais envoye depuis un autre site) et limite au
+  chemin de l'API (ni WordPress ni les autres applications ne le recoivent).
+  Nouvelle session a chaque connexion, expiration par duree maximale et par
+  inactivite, deconnexion qui detruit la session cote serveur, et revalidation
+  reguliere du token aupres du SSO : un acces revoque dans WordPress est coupe
+  au plus tard apres `SESSION_REVALIDATE_SECONDS`. Les requetes POST exigent en
+  plus l'en-tete `X-Requested-With` (garde anti-CSRF).
 - **OAuth2** : echange du code cote backend uniquement, parametre `state`
   anti-CSRF verifie au retour, code a usage unique protege contre le double envoi.
 - **Entrees** : validation stricte (code departement, pagination, code OAuth),
@@ -201,6 +216,14 @@ CSP ne doit apparaitre) avant de la garder :
 </Location>
 ```
 
+Limite assumee : les sessions sont gardees en memoire. Un redemarrage du backend
+(deploiement, `pm2 restart`) deconnecte les utilisateurs, qui se reconnectent via le SSO.
+Si le backend devait tourner en plusieurs instances, il faudrait un magasin de sessions
+partage (base de donnees, Redis).
+
+**Migration** : les anciennes versions gardaient le token dans le `localStorage`. Le
+frontend supprime automatiquement cette ancienne valeur au demarrage ; chaque utilisateur
+doit se reconnecter une fois apres la mise a jour.
 
 ## Licence
 

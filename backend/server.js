@@ -2,16 +2,20 @@
 // Backend Express de l'application MedSearch.
 //
 // Endpoints exposes :
-//  - POST /auth/token          -> echange securise du "code" OAuth2 contre un access_token
-//                                 (le client_secret WordPress reste ici, jamais cote frontend)
-//  - GET  /medecins            -> annuaire des medecins (OpenDataSoft)         [authentifie]
-//  - GET  /fhir/practitioners      -> recherche FHIR (nom, prenom, lieu, profession...) [authentifie]
-//  - GET  /fhir/practitioners/:id  -> fiche detaillee d'un professionnel FHIR           [authentifie]
+//  - POST /auth/token          -> echange securise du "code" OAuth2 ; ouvre une session
+//                                 (cookie HttpOnly), le token SSO reste cote serveur
+//  - GET  /auth/session        -> indique si le navigateur a une session ouverte
+//  - POST /auth/logout         -> ferme la session
+//  - GET  /medecins            -> annuaire des medecins (OpenDataSoft)         [session]
+//  - GET  /fhir/practitioners      -> recherche FHIR (nom, prenom, lieu, profession...) [session]
+//  - GET  /fhir/practitioners/:id  -> fiche detaillee d'un professionnel FHIR           [session]
 //  - GET  /test                -> verification que le serveur repond
 //
-// Les routes de donnees exigent un access_token valide : il est verifie aupres
-// du serveur SSO WordPress (endpoint userinfo). Sans cela, n'importe qui
-// pouvait interroger l'API directement en contournant l'ecran de connexion.
+// Authentification : apres la connexion SSO, le navigateur ne recoit qu'un
+// identifiant de session opaque dans un cookie HttpOnly (illisible par
+// JavaScript, donc non volable par une faille XSS). Le token d'acces du SSO est
+// garde dans la session, cote serveur, et revalide regulierement aupres de
+// WordPress (une revocation cote SSO coupe l'acces).
 //
 // Toutes les valeurs sensibles (cles d'API, secrets OAuth) sont lues depuis
 // des variables d'environnement (voir .env.example) et ne doivent jamais
@@ -23,13 +27,13 @@
 // du dossier du script, ce qui ferait chercher le .env au mauvais endroit.
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 
-const crypto = require('crypto');
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { sanitizeDeep } = require('./sanitize');
+const { SessionStore } = require('./sessions');
 const { buildCriteria, searchPractitioners, getPractitionerDetail, NotFoundError } = require('./fhirSearch');
 
 const app = express();
@@ -50,6 +54,18 @@ const WP_USERINFO_ENDPOINT = process.env.WP_USERINFO_ENDPOINT;
 const WP_CLIENT_ID = process.env.WP_CLIENT_ID;
 const WP_CLIENT_SECRET = process.env.WP_CLIENT_SECRET;
 const WP_REDIRECT_URI = process.env.WP_REDIRECT_URI;
+
+// Session et cookie
+//  - COOKIE_SECURE : le cookie n'est envoye qu'en HTTPS (laisser a true en production ;
+//    mettre "false" uniquement pour un test local en http).
+//  - COOKIE_PATH : chemin PUBLIC de l'API (celui vu par le navigateur, derriere Apache).
+//    Le cookie n'est ainsi envoye ni a WordPress ni aux autres applications du site.
+const COOKIE_SECURE = process.env.COOKIE_SECURE !== 'false';
+const COOKIE_PATH = process.env.COOKIE_PATH || '/MedSearch/api';
+const COOKIE_NAME = COOKIE_SECURE ? '__Secure-medsearch_session' : 'medsearch_session';
+const SESSION_MAX_AGE_MS = (Number(process.env.SESSION_MAX_AGE_HOURS) || 8) * 60 * 60 * 1000;
+const SESSION_IDLE_MS = (Number(process.env.SESSION_IDLE_MINUTES) || 60) * 60 * 1000;
+const SESSION_REVALIDATE_MS = (Number(process.env.SESSION_REVALIDATE_SECONDS) || 60) * 1000;
 
 // On previent au demarrage si des variables requises manquent, plutot que
 // d'echouer de facon obscure plus tard.
@@ -90,7 +106,7 @@ app.use(helmet());
 app.use(cors({
   origin: CORS_ORIGIN,
   methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'X-Requested-With'],
 }));
 
 // Corps JSON limite : les seuls corps attendus sont minuscules ({ code }).
@@ -126,62 +142,89 @@ app.use((req, res, next) => {
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 // ---------------------------------------------------------------------------
-// Authentification des routes de donnees
+// Sessions et authentification des routes de donnees
 // ---------------------------------------------------------------------------
 
-// Cache memoire court des tokens deja valides : evite d'appeler le serveur
-// WordPress a chaque requete. On ne stocke jamais le token lui-meme, seulement
-// son empreinte SHA-256.
-const TOKEN_CACHE_TTL_MS = 60 * 1000;
-const TOKEN_CACHE_MAX_ENTRIES = 500;
-const tokenCache = new Map();
+const sessions = new SessionStore({
+  maxAgeMs: SESSION_MAX_AGE_MS,
+  idleMs: SESSION_IDLE_MS,
+  maxSessions: 1000,
+});
+// Nettoyage periodique des sessions expirees (ne bloque pas l'arret du process).
+setInterval(() => sessions.prune(), 10 * 60 * 1000).unref();
 
-function pruneTokenCache() {
-  const now = Date.now();
-  for (const [key, expiresAt] of tokenCache) {
-    if (expiresAt <= now) tokenCache.delete(key);
-  }
-  // Garde-fou : si le cache reste plein, on le vide (on revalidera simplement).
-  if (tokenCache.size >= TOKEN_CACHE_MAX_ENTRIES) tokenCache.clear();
+const cookieOptions = {
+  httpOnly: true,          // illisible par JavaScript : protege contre le vol par XSS
+  secure: COOKIE_SECURE,   // jamais envoye en clair
+  sameSite: 'strict',      // jamais envoye lors d'une requete venant d'un autre site (anti-CSRF)
+  path: COOKIE_PATH,
+};
+
+function setSessionCookie(res, sessionId) {
+  res.cookie(COOKIE_NAME, sessionId, { ...cookieOptions, maxAge: SESSION_MAX_AGE_MS });
 }
 
+function clearSessionCookie(res) {
+  res.clearCookie(COOKIE_NAME, cookieOptions);
+}
+
+// Express ne lit pas les cookies seul : lecture minimale, par nom exact.
+function readCookie(req, name) {
+  const header = req.headers.cookie;
+  if (!header) return undefined;
+  for (const part of header.split(';')) {
+    const index = part.indexOf('=');
+    if (index !== -1 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
+  }
+  return undefined;
+}
+
+// Garde anti-CSRF supplementaire pour les requetes POST : un site tiers ne peut
+// pas ajouter cet en-tete personnalise sans declencher un controle CORS, que
+// notre configuration refuse. Le frontend l'ajoute a toutes ses requetes.
+const requireCsrfHeader = (req, res, next) => {
+  if (req.get('X-Requested-With') !== 'MedSearch') {
+    return res.status(403).json({ error: 'Requete refusee.' });
+  }
+  next();
+};
+
+// Exige une session valide. Le token SSO de la session est revalide aupres de
+// WordPress toutes les SESSION_REVALIDATE_SECONDS : s'il a ete revoque ou a
+// expire, la session est detruite.
 const requireAuth = asyncHandler(async (req, res, next) => {
   if (!WP_USERINFO_ENDPOINT) {
     return res.status(500).json({ error: 'Configuration serveur incomplete (authentification).' });
   }
 
-  // Format strict "Bearer <token>" : caracteres et longueur bornes.
-  const match = /^Bearer ([A-Za-z0-9._~+/=-]{10,2048})$/.exec(req.get('Authorization') || '');
-  if (!match) {
+  const sessionId = readCookie(req, COOKIE_NAME);
+  const session = sessions.get(sessionId);
+  if (!session) {
+    if (sessionId) clearSessionCookie(res); // cookie perime ou invente : on le supprime
     return res.status(401).json({ error: 'Authentification requise.' });
   }
-  const token = match[1];
-  const cacheKey = crypto.createHash('sha256').update(token).digest('hex');
 
-  const cachedUntil = tokenCache.get(cacheKey);
-  if (cachedUntil && cachedUntil > Date.now()) {
-    return next();
-  }
-
-  try {
-    // Le serveur SSO est seul juge de la validite du token.
-    await axios.get(WP_USERINFO_ENDPOINT, {
-      headers: { Authorization: `Bearer ${token}` },
-      timeout: 8000,
-    });
-  } catch (error) {
-    tokenCache.delete(cacheKey);
-    const status = error.response?.status;
-    if (status === 400 || status === 401 || status === 403) {
-      return res.status(401).json({ error: 'Session invalide ou expiree, veuillez vous reconnecter.' });
+  if (session.validatedUntil <= Date.now()) {
+    try {
+      // Le serveur SSO est seul juge de la validite du token.
+      await axios.get(WP_USERINFO_ENDPOINT, {
+        headers: { Authorization: `Bearer ${session.accessToken}` },
+        timeout: 8000,
+      });
+      session.validatedUntil = Date.now() + SESSION_REVALIDATE_MS;
+    } catch (error) {
+      const status = error.response?.status;
+      if (status === 400 || status === 401 || status === 403) {
+        sessions.destroy(sessionId);
+        clearSessionCookie(res);
+        return res.status(401).json({ error: 'Session invalide ou expiree, veuillez vous reconnecter.' });
+      }
+      // Panne reseau/serveur SSO : ce n'est pas la faute de l'utilisateur.
+      console.error('Erreur verification token SSO:', error.response?.data || error.message);
+      return res.status(503).json({ error: "Service d'authentification momentanement indisponible." });
     }
-    // Panne reseau/serveur SSO : ce n'est pas la faute de l'utilisateur.
-    console.error('Erreur verification token SSO:', error.response?.data || error.message);
-    return res.status(503).json({ error: "Service d'authentification momentanement indisponible." });
   }
 
-  pruneTokenCache();
-  tokenCache.set(cacheKey, Date.now() + TOKEN_CACHE_TTL_MS);
   next();
 });
 
@@ -308,13 +351,15 @@ app.get('/fhir/practitioners/:id', requireAuth, asyncHandler(async (req, res) =>
 }));
 
 // ---------------------------------------------------------------------------
-// Echange du code d'autorisation OAuth2 contre un access_token.
+// Echange du code d'autorisation OAuth2 et ouverture de session.
 //
 // Le "client_secret" du SSO WordPress ne doit jamais partir dans le bundle
 // JavaScript envoye au navigateur : le frontend envoie uniquement le "code" ;
 // ce backend, seul depositaire du secret, effectue l'echange final.
+// Le token obtenu n'est PAS renvoye au navigateur : il est range dans une
+// session serveur, et le navigateur recoit seulement un cookie HttpOnly.
 // ---------------------------------------------------------------------------
-app.post('/auth/token', authLimiter, asyncHandler(async (req, res) => {
+app.post('/auth/token', authLimiter, requireCsrfHeader, asyncHandler(async (req, res) => {
   if (!WP_TOKEN_ENDPOINT || !WP_CLIENT_ID || !WP_CLIENT_SECRET || !WP_REDIRECT_URI) {
     return res.status(500).json({ error: 'Configuration OAuth2 incomplete cote serveur.' });
   }
@@ -325,6 +370,7 @@ app.post('/auth/token', authLimiter, asyncHandler(async (req, res) => {
     return res.status(400).json({ error: "Le parametre 'code' est requis et doit etre valide." });
   }
 
+  let accessToken;
   try {
     const tokenResponse = await axios.post(
       WP_TOKEN_ENDPOINT,
@@ -341,18 +387,38 @@ app.post('/auth/token', authLimiter, asyncHandler(async (req, res) => {
       }
     );
 
-    const accessToken = tokenResponse.data?.access_token;
+    accessToken = tokenResponse.data?.access_token;
     if (typeof accessToken !== 'string' || accessToken === '') {
       throw new Error('Reponse du serveur SSO sans access_token.');
     }
-
-    // On ne renvoie au frontend que ce qui lui est necessaire.
-    res.json({ access_token: accessToken });
   } catch (error) {
     console.error('Erreur echange token OAuth2:', error.response?.data || error.message);
-    res.status(502).json({ error: "Echec de l'authentification aupres du serveur SSO." });
+    return res.status(502).json({ error: "Echec de l'authentification aupres du serveur SSO." });
   }
+
+  // Nouvelle session a chaque connexion (jamais de reutilisation d'un ancien
+  // identifiant) ; l'eventuelle session precedente de ce navigateur est detruite.
+  sessions.destroy(readCookie(req, COOKIE_NAME));
+  const sessionId = sessions.create(accessToken, { validatedUntil: Date.now() + SESSION_REVALIDATE_MS });
+  setSessionCookie(res, sessionId);
+  res.json({ authenticated: true });
 }));
+
+// Le navigateur ne pouvant pas lire le cookie HttpOnly, il demande au serveur
+// s'il est connecte. Repond toujours 200 : "non connecte" n'est pas une erreur.
+app.get('/auth/session', (req, res) => {
+  const sessionId = readCookie(req, COOKIE_NAME);
+  const authenticated = Boolean(sessions.get(sessionId));
+  if (sessionId && !authenticated) clearSessionCookie(res);
+  res.json({ authenticated });
+});
+
+// Deconnexion : detruit la session cote serveur et supprime le cookie.
+app.post('/auth/logout', requireCsrfHeader, (req, res) => {
+  sessions.destroy(readCookie(req, COOKIE_NAME));
+  clearSessionCookie(res);
+  res.status(204).end();
+});
 
 // ---------------------------------------------------------------------------
 // Verification que le serveur repond
